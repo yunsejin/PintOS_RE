@@ -10,7 +10,8 @@
 #include "vm/vm.h"
 #endif
 
-
+/* List of processes in THREAD_READY state, that is, processes
+   that are ready to run but not actually running. */
 /* States in a thread's life cycle. */
 enum thread_status {
 	THREAD_RUNNING,     /* Running thread. */
