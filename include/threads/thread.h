@@ -10,9 +10,6 @@
 #include "vm/vm.h"
 #endif
 
-/* List of processes in THREAD_READY state, that is, processes
-   that are ready to run but not actually running. */
-/* States in a thread's life cycle. */
 enum thread_status {
 	THREAD_RUNNING,     /* Running thread. */
 	THREAD_READY,       /* Not running but ready to run. */
@@ -94,11 +91,15 @@ struct thread {
 	char name[16];                      /* Name (for debugging purposes). */
 	int priority;                       /* Priority. */
 
-	int64_t sleep_ticks;                /* Sleep ticks. */
 	int64_t wakeup_tick;               /* Wakeup ticks. */
 
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
+
+	int original_priority;
+	struct lock *wait_on_lock;
+	struct list donations;
+	struct list_elem d_elem;
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
@@ -152,5 +153,5 @@ int thread_get_load_avg (void);
 void do_iret (struct intr_frame *tf);
 
 bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-
+bool sleep_less(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 #endif /* threads/thread.h */

@@ -55,7 +55,7 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
 bool sleep_less(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
-bool cmp_priority(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
+bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -211,6 +211,8 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	thread_unblock (t);
+	if(t->priority > thread_get_priority())
+		thread_yield();
 
 	return tid;
 }
@@ -245,7 +247,7 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+	list_insert_ordered(&ready_list, &t->elem, cmp_priority, NULL);
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -308,7 +310,7 @@ thread_yield (void) {
 
 	old_level = intr_disable ();
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		list_insert_ordered(&ready_list, &curr->elem, cmp_priority, NULL);
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
@@ -361,7 +363,14 @@ thread_wakeup(int64_t ticks)
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
+	if(list_empty(&thread_current()->donations))
+		thread_current ()->priority = new_priority;
+		
+	thread_current ()->original_priority = new_priority;
+
+	struct thread *head_thread = list_entry(list_begin(&ready_list), struct thread, elem);
+	if(head_thread->priority > new_priority)
+		thread_yield();
 }
 
 /* Returns the current thread's priority. */
@@ -459,6 +468,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+
+	t->original_priority = priority;
+	list_init(&t->donations);
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -640,15 +652,15 @@ allocate_tid (void) {
 }
 
 bool
-sleep_less(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED){
-	const struct thread *a = list_entry(a_, struct thread, elem);
-	const struct thread *b = list_entry(b_, struct thread, elem);
-	return a->wakeup_tick < b->wakeup_tick;
+sleep_less(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+	struct thread *ta = list_entry(a, struct thread, elem);
+	struct thread *tb = list_entry(b, struct thread, elem);
+	return ta->wakeup_tick < tb->wakeup_tick;
 }
 
 bool
-cmp_priority(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED){
-	const struct thread *a = list_entry(a_, struct thread, elem);
-	const struct thread *b = list_entry(b_, struct thread, elem);
-	return a->priority > b->priority;
+cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+	struct thread *ta = list_entry(a, struct thread, elem);
+	struct thread *tb = list_entry(b, struct thread, elem);
+	return ta->priority > tb->priority;
 }
