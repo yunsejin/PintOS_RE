@@ -27,7 +27,8 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
-
+static struct list sleep_list;
+static struct list greater_list;
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -53,6 +54,8 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+bool sleep_less(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
+bool cmp_priority(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -108,6 +111,8 @@ thread_init (void) {
 	/* Init the globla thread context */
 	lock_init (&tid_lock);
 	list_init (&ready_list);
+	list_init (&sleep_list);
+	list_init (&greater_list);
 	list_init (&destruction_req);
 
 	/* Set up a thread structure for the running thread. */
@@ -306,6 +311,51 @@ thread_yield (void) {
 		list_push_back (&ready_list, &curr->elem);
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
+}
+
+void
+thread_sleep(int64_t ticks){
+	struct thread *curr = thread_current();
+	enum intr_level old_level;	
+
+	ASSERT(!intr_context());
+
+	old_level = intr_disable();
+	curr->status = THREAD_BLOCKED;
+	curr->wakeup_tick = ticks;
+	
+	if(curr!= idle_thread)
+		list_insert_ordered(&sleep_list, &curr->elem, sleep_less , NULL);
+	schedule();
+	intr_set_level(old_level);
+}
+
+void
+thread_wakeup(int64_t ticks)
+{
+	if(list_empty(&sleep_list))
+		return;
+
+	enum intr_level old_level;
+	struct thread *sleep_front_thread = list_entry(list_begin(&sleep_list),struct thread, elem);
+	struct thread *sleep_pop_front_thread;
+
+	while(sleep_front_thread->wakeup_tick <= ticks)
+	{
+		old_level = intr_disable();
+		sleep_front_thread->status = THREAD_READY;
+		sleep_pop_front_thread = list_entry(list_pop_front(&sleep_list), struct thread, elem);
+		list_insert_ordered(&greater_list, &sleep_pop_front_thread->elem , cmp_priority, NULL);
+		sleep_front_thread = list_entry(list_begin(&sleep_list),struct thread, elem);	
+		intr_set_level(old_level);
+	}
+
+	while(!list_empty(&greater_list))
+	{
+		old_level = intr_disable();
+		list_push_back(&ready_list, list_pop_front(&greater_list));
+		intr_set_level(old_level);
+	}
 }
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
@@ -587,4 +637,18 @@ allocate_tid (void) {
 	lock_release (&tid_lock);
 
 	return tid;
+}
+
+bool
+sleep_less(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED){
+	const struct thread *a = list_entry(a_, struct thread, elem);
+	const struct thread *b = list_entry(b_, struct thread, elem);
+	return a->wakeup_tick < b->wakeup_tick;
+}
+
+bool
+cmp_priority(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED){
+	const struct thread *a = list_entry(a_, struct thread, elem);
+	const struct thread *b = list_entry(b_, struct thread, elem);
+	return a->priority > b->priority;
 }
