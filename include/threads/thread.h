@@ -115,6 +115,11 @@ struct thread {
 	unsigned magic;                     /* Detects stack overflow. */
 };
 
+struct file_descriptor {
+	int fd_num;
+	struct file *file;
+	struct list_elem fd_elem;
+};
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
