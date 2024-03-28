@@ -50,6 +50,8 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	char *save_ptr;
+	strtok_r (file_name, " ", &save_ptr);
 	/* Create a new thread to execute FILE_NAME. */
 	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
@@ -175,9 +177,18 @@ process_exec (void *f_name) {
 
 	/* We first kill the current context */
 	process_cleanup ();
-
+	int argc = 0;
+    char *argv[64];		//parssing한 인자를 담을 배열
+    char *token, *save_ptr;
+    
+	for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr))
+    {   
+		argv[argc++] = token;
+	}
 	/* And then load the binary */
 	success = load (file_name, &_if);
+
+	argument_stack(argv, argc, &_if);
 
 	/* If load failed, quit. */
 	palloc_free_page (file_name);
@@ -189,6 +200,40 @@ process_exec (void *f_name) {
 	NOT_REACHED ();
 }
 
+void argument_stack(char **argv, int argc, struct intr_frame *if_)
+{
+	char *arg_address[128];
+
+	for(int i = argc - 1; i >= 0; i--)
+	{
+		int arg_i_len = strlen(argv[i]) +1;
+		if_->rsp -= arg_i_len;
+		memcpy(if_->rsp, argv[i], arg_i_len);
+		arg_address[i] = (char *)if_->rsp;
+	}
+
+	if(if_->rsp % 8 != 0)
+	{	
+		int padding = if_->rsp % 8;
+		if_->rsp -= padding;
+		memset(if_->rsp, 0, padding);
+	}
+
+	if_->rsp -= 8; 	
+	memset(if_->rsp, 0, 8);
+
+	for(int i = argc-1; i >= 0; i--)
+	{
+		if_->rsp -= 8;
+		memcpy(if_->rsp, &arg_address[i], 8);
+	}
+
+	if_->rsp -= 8;
+	memset(if_->rsp, 0, 8);
+
+	if_->R.rdi = argc;
+	if_->R.rsi = if_->rsp + 8;
+}
 
 /* Waits for thread TID to die and returns its exit status.  If
  * it was terminated by the kernel (i.e. killed due to an
@@ -204,6 +249,9 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	for (int i; i < 2100000000; i++){
+
+	}
 	return -1;
 }
 

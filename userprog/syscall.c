@@ -7,10 +7,20 @@
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
+#include "include/threads/init.h"
+#include "filesys/filesys.h"
+#include "userprog/process.h"
+#include "include/lib/stdio.h"
+#include "include/lib/string.h"
+#include "include/lib/user/syscall.h"
+#include "devices/input.h"
+#include "threads/palloc.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
+
+static struct intr_frame *frame;
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -41,6 +51,49 @@ syscall_init (void) {
 void
 syscall_handler (struct intr_frame *f UNUSED) {
 	// TODO: Your implementation goes here.
-	printf ("system call!\n");
-	thread_exit ();
+	frame = f;
+	switch(f->R.rax)
+	{
+		case SYS_HALT:
+			// halt();
+			break;
+		case SYS_EXIT:	
+			// exit(f->R.rdi);
+			break;
+		case SYS_FORK:
+			// f->R.rax = fork(f->R.rdi);
+			break;
+		case SYS_EXEC:
+			// f->R.rax = exec(f->R.rdi);
+			break;
+		case SYS_WAIT:
+			// f->R.rax = wait(f->R.rdi);
+			break;
+		case SYS_CREATE:
+			// f->R.rax = create(f->R.rdi, f->R.rsi);
+			break;
+		case SYS_OPEN:
+			// f->R.rax = open(f->R.rdi);
+			break;
+		case SYS_FILESIZE:
+			// f->R.rax = filesize(f->R.rdi);
+			break;
+		case SYS_READ:
+			// f->R.rax = read(f->R.rdi, f->R.rsi, f->R.rdx);
+			break;
+		case SYS_WRITE:
+			// f->R.rax = write(f->R.rdi, f->R.rsi, f->R.rdx);
+			break;	
+		case SYS_SEEK:
+			// seek(f->R.rdi, f->R.rsi);
+			break;	
+		case SYS_TELL:
+			// f->R.rax = tell(f->R.rdi);
+			break;	
+		case SYS_CLOSE:
+			// close(f->R.rdi);
+			break;
+		default:
+			break;
+	}
 }
