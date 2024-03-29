@@ -16,9 +16,12 @@
 #include "devices/input.h"
 #include "threads/palloc.h"
 
+void exit (int status) NO_RETURN;
+int write (int fd, const void *buffer, unsigned length);
+
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
-
+void check_address(void *addr);
 
 static struct intr_frame *frame;
 /* System call.
@@ -29,6 +32,7 @@ static struct intr_frame *frame;
  *
  * The syscall instruction works by reading the values from the the Model
  * Specific Register (MSR). For the details, see the manual. */
+
 
 #define MSR_STAR 0xc0000081         /* Segment selector msr */
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
@@ -57,8 +61,8 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_HALT:
 			power_off();
 			break;
-		case SYS_EXIT:	
-			// exit(f->R.rdi);
+		case SYS_EXIT:
+			exit(f->R.rdi);
 			break;
 		case SYS_FORK:
 			// f->R.rax = fork(f->R.rdi);
@@ -82,8 +86,8 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			// f->R.rax = read(f->R.rdi, f->R.rsi, f->R.rdx);
 			break;
 		case SYS_WRITE:
-			// f->R.rax = write(f->R.rdi, f->R.rsi, f->R.rdx);
-			break;	
+			f->R.rax = write(f->R.rdi, f->R.rsi, f->R.rdx);
+			break;
 		case SYS_SEEK:
 			// seek(f->R.rdi, f->R.rsi);
 			break;	
@@ -96,4 +100,34 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		default:
 			break;
 	}
+}
+
+void exit(int status)
+{
+	struct thread *cur = thread_current();
+	cur->exit_status = status;
+	printf("%s: exit(%d)\n", cur->name, status);
+	thread_exit();
+}
+
+int write (int fd, const void *buffer, unsigned length)
+{
+	int byte = 0;
+	if(fd == 1)
+	{
+		putbuf(buffer, length);
+		byte = length;
+	}
+	return byte;
+}
+
+void check_address(void *addr)
+{
+
+	struct thread *t = thread_current();
+
+	if(!is_user_vaddr(addr) || addr == NULL || pml4_get_page(t->pml4, addr) == NULL)
+
+		exit(-1);
+
 }

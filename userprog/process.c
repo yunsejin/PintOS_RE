@@ -26,6 +26,7 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+void argument_stack(char **argv, int argc, struct intr_frame *if_);
 
 /* General process initializer for initd and other process. */
 static void
@@ -454,7 +455,8 @@ load (const char *file_name, struct intr_frame *if_) {
 				break;
 		}
 	}
-
+	t->running = file;
+	file_deny_write (file);
 	/* Set up stack. */
 	if (!setup_stack (if_))
 		goto done;
