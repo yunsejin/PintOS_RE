@@ -27,6 +27,7 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
+#define FDT_COUNT_LIMIT 128
 /* A kernel thread or user process.
  *
  * Each thread structure is stored in its own 4 kB page.  The
@@ -91,16 +92,29 @@ struct thread {
 	char name[16];                      /* Name (for debugging purposes). */
 	int priority;                       /* Priority. */
 
-	int64_t wakeup_tick;               /* Wakeup ticks. */
+	//local tick
+	int64_t wakeup_tick;
 
 	/* Shared between thread.c and synch.c. */
-	struct list_elem elem;              /* List element. */
+	struct list_elem elem;     
 
 	int original_priority;
 	struct lock *wait_on_lock;
 	struct list donations;
 	struct list_elem d_elem;
 
+	// system call
+	int last_create_fd;
+	struct list fd_list;
+
+	struct intr_frame parent_if;	
+	struct list child_list;
+	struct list_elem child_elem;	
+
+	struct semaphore load_sema;
+	struct semaphore exit_sema;
+	struct semaphore wait_sema;
+	 
 	struct file *running;
 	int exit_status;
 
@@ -114,8 +128,8 @@ struct thread {
 #endif
 
 	/* Owned by thread.c. */
-	struct intr_frame tf;               /* Information for switching */
-	unsigned magic;                     /* Detects stack overflow. */
+	struct intr_frame tf;
+	unsigned magic;
 };
 
 struct file_descriptor {
@@ -163,4 +177,5 @@ void do_iret (struct intr_frame *tf);
 
 bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 bool sleep_less(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+
 #endif /* threads/thread.h */

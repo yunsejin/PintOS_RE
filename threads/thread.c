@@ -211,8 +211,9 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	thread_unblock (t);
+	list_push_back(&thread_current()->child_list, &t->child_elem);
 	if(t->priority > thread_get_priority())
-		thread_yield();
+		thread_try_yield();
 
 	return tid;
 }
@@ -476,6 +477,14 @@ init_thread (struct thread *t, const char *name, int priority) {
 
 	t->original_priority = priority;
 	list_init(&t->donations);
+	
+	t->exit_status = 0;
+	t->last_create_fd = 2;
+	list_init(&t->fd_list);
+	list_init(&t->child_list);
+	sema_init(&t->load_sema,0);
+	sema_init(&t->exit_sema,0);
+	sema_init(&t->wait_sema,0);
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
