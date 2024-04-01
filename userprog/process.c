@@ -515,7 +515,7 @@ load(const char *file_name, struct intr_frame *if_)
 			break;
 		}
 	}
-.
+
 	t->running = file;
 
 	file_deny_write(file);
