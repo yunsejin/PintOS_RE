@@ -5,10 +5,13 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
-#include "threads/synch.h"
+#include "devices/timer.h"
+#include "filesys/file.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
+
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -28,8 +31,6 @@ typedef int tid_t;
 #define PRI_MIN 0	   /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63	   /* Highest priority. */
-
-#define FDT_COUNT_LIMIT 128
 
 /* A kernel thread or user process.
  *
@@ -91,47 +92,69 @@ typedef int tid_t;
 struct thread
 {
 	/* Owned by thread.c. */
-	tid_t tid;				   /* Thread identifier. */
-	enum thread_status status; /* Thread state. */
-	char name[16];			   /* Name (for debugging purposes). */
-	int priority;			   /* Priority. */
-	int64_t wakeup_ticks;
-
+	tid_t tid;                       /* Thread identifier. */
+	enum thread_status status;       /* Thread state. */
+	char name[16];                   /* Name (for debugging purposes). */
+	int priority;                    /* Priority. */
+	int original_priority;
+	int64_t sleep_ticks;
+	int has_lock;
 	/* Shared between thread.c and synch.c. */
-	struct list_elem elem; /* List element. */
+	struct list_elem elem;           /* List element. */
+	struct list_elem donor_elem;
 
-	int init_priority;
+	struct list donors;
 	struct lock *wait_on_lock;
-	struct list donations;
-	struct list_elem donation_elem;
 
-	int exit_status;
-	struct file **fdt;
-	int next_fd;
-
-	struct intr_frame parent_if;
-	struct list child_list;
-	struct list_elem child_elem;
-
-	struct semaphore load_sema;
-	struct semaphore exit_sema;
-	struct semaphore wait_sema;
-
-	struct file *running;
-
+	int nice_value;
+	int recent_cpu;
+	struct list_elem all_elem;
+	
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
-	uint64_t *pml4; /* Page map level 4 */
+	uint64_t *pml4;                     /* Page map level 4 */
+	// struct list fd_table;
+	// unsigned last_created_fd;
+
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
-#endif
+	// struct list frame_list;
 
+#endif
+	void* stack_pointer;
+	void* stack_bottom; 
 	/* Owned by thread.c. */
-	struct intr_frame tf; /* Information for switching */
-	unsigned magic;		  /* Detects stack overflow. */
+	struct intr_frame tf;               /* Information for switching */
+	unsigned magic;                     /* Detects stack overflow. */
+
+	//IMPLEMENTATION
+	struct list child_list;
+	struct list_elem child_list_elem;
+
+	struct thread *parent;
+	int exit_status; 
+	struct intr_frame parent_tf;
+
+	struct file *running;
+
+	struct semaphore process_sema;
+	struct semaphore wait_sema;
+	struct semaphore exit_sema;
+
+	struct list fd_table;
+	unsigned last_created_fd;
+
 };
+
+struct file_descriptor
+{
+	unsigned fd;
+	struct file* file;
+	struct list_elem fd_elem;
+};
+
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -156,26 +179,35 @@ const char *thread_name(void);
 
 void thread_exit(void) NO_RETURN;
 void thread_yield(void);
+
+int thread_get_priority (void);
+void thread_set_priority (int);
+
+int thread_get_nice (void);
+void thread_set_nice (int);
+int thread_get_recent_cpu (void);
+int thread_get_load_avg (void);
+
+void do_iret (struct intr_frame *tf);
+
 void thread_sleep(int64_t ticks);
-void thread_wakeup(int64_t current_ticks);
-bool cmp_thread_ticks(const struct list_elem *a, const struct list_elem *b, void *aux);
+void thread_wakeup(int64_t ticks);
 
-int thread_get_priority(void);
-void thread_set_priority(int);
-bool cmp_thread_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
-bool cmp_sema_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
-void preempt_priority(void);
+void update_load_avg();
+void apply_to_all();
+int calculating_recent_cpu(struct thread* t);
+struct list all_list;
+struct list ready_list;
 
-bool cmp_donation_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
-void donate_priority(void);
-void remove_donor(struct lock *lock);
-void update_priority_for_donations(void);
+void calc_all_recent_cpu();
+bool priority_scheduling(const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
 
-int thread_get_nice(void);
-void thread_set_nice(int);
-int thread_get_recent_cpu(void);
-int thread_get_load_avg(void);
-
-void do_iret(struct intr_frame *tf);
+void update_priority();
+void calculate_all_priority();
+void try_thread_yield();
 
 #endif /* threads/thread.h */
+
+#ifdef USERPROG
+int allocate_fd(struct file *file, struct list *fd_table);
+#endif

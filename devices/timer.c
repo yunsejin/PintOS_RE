@@ -7,6 +7,7 @@
 #include "threads/io.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "lib/kernel/list.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -16,6 +17,8 @@
 #if TIMER_FREQ > 1000
 #error TIMER_FREQ <= 1000 recommended
 #endif
+#define F (1 << (14))
+#define ADD_INT(x, n) ((x) + (n) * (F))
 
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
@@ -97,8 +100,10 @@ timer_elapsed(int64_t then)
 void timer_sleep(int64_t ticks)
 {
 	int64_t start = timer_ticks();
+	if(ticks <= 0)
+		return;
 	ASSERT(intr_get_level() == INTR_ON);
-	thread_sleep(start + ticks);
+	thread_sleep(ticks + start);
 }
 
 /* Suspends execution for approximately MS milliseconds. */
@@ -132,6 +137,17 @@ timer_interrupt(struct intr_frame *args UNUSED)
 	ticks++;
 	thread_tick();
 	thread_wakeup(ticks);
+	enum intr_level  old_level;
+	if (thread_mlfqs == true){
+		struct thread *cur;
+		cur = thread_current();
+		if (cur->status == THREAD_RUNNING)
+			cur->recent_cpu = ADD_INT (cur->recent_cpu, 1);
+
+		if(timer_ticks() % TIMER_FREQ == 0){
+			update_load_avg();
+		}
+	}
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

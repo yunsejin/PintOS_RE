@@ -10,6 +10,7 @@
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/fsutil.h"
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
@@ -18,14 +19,28 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "lib/string.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
 
+#include "userprog/syscall.h"
+
+
 static void process_cleanup(void);
 static bool load(const char *file_name, struct intr_frame *if_);
 static void initd(void *f_name);
-static void __do_fork(void *);
+
+void argument_stack(char** argv, int argc, struct intr_frame *if_);
+struct thread *get_thread_from_tid(tid_t thread_id);
+bool
+lazy_load_segment (struct page *page, void *aux);
+struct parent_info
+{
+	struct thread *parent;
+	struct intr_frame *parent_f;
+};
+static void __do_fork (struct parent_info *aux);
 
 /* General process initializer for initd and other process. */
 static void
@@ -39,6 +54,37 @@ process_init(void)
  * before process_create_initd() returns. Returns the initd's
  * thread id, or TID_ERROR if the thread cannot be created.
  * Notice that THIS SHOULD BE CALLED ONCE. */
+
+void argument_stack (char **argv, int argc, struct intr_frame *if_){
+	
+	int minus_addr;
+	int address = if_->rsp;
+	for (int i = argc-1; i >= 0;i-- ){
+		minus_addr = strlen(argv[i]) + 1;
+		address -= minus_addr;
+		memcpy(address, argv[i], minus_addr);
+		argv[i] = (char *)address;
+	}
+
+	if (address % 8){
+		int word_align = address % 8;
+		address -= word_align;
+		memset(address, 0, word_align);
+	}
+
+	address -= 8;
+	memset(address, 0, sizeof(char*));
+
+	address -= (sizeof(char*) * argc);
+	memcpy(address, argv, sizeof(char*) * argc);
+
+
+	address -= 8;
+	memset(address, 0, 8);
+	if_->rsp = address;
+}
+
+
 tid_t process_create_initd(const char *file_name)
 {
 	char *fn_copy;
@@ -46,7 +92,7 @@ tid_t process_create_initd(const char *file_name)
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
-	fn_copy = palloc_get_page(0);
+	fn_copy = palloc_get_page(PAL_ZERO);
 	if (fn_copy == NULL)
 		return TID_ERROR;
 	strlcpy(fn_copy, file_name, PGSIZE);
@@ -56,21 +102,21 @@ tid_t process_create_initd(const char *file_name)
 
 	/* Create a new thread to execute FILE_NAME. */
 	tid = thread_create(file_name, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
+	if (tid == TID_ERROR){
 		palloc_free_page(fn_copy);
-	return tid;
+		palloc_free_page(file_name);
+	}
+
+	return tid == TID_ERROR? TID_ERROR: tid;
 }
 
 /* A thread function that launches first user process. */
 static void
-initd(void *f_name)
-{
+initd (void *f_name){
 #ifdef VM
 	supplemental_page_table_init(&thread_current()->spt);
 #endif
-
 	process_init();
-
 	if (process_exec(f_name) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED();
@@ -78,26 +124,29 @@ initd(void *f_name)
 
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
-tid_t process_fork(const char *name, struct intr_frame *if_ UNUSED)
+tid_t process_fork(const char *name, struct intr_frame *if_)
 {
 	/* Clone current thread to new thread.*/
+	struct parent_info my_data;
+	my_data.parent = thread_current();
+	my_data.parent_f = if_;
+
 	struct thread *cur = thread_current();
-	memcpy(&cur->parent_if, if_, sizeof(struct intr_frame));
+	memcpy(&cur->parent_tf, my_data.parent_f , sizeof(struct intr_frame));
 
-	tid_t pid = thread_create(name, PRI_DEFAULT, __do_fork, cur);
-	if (pid == TID_ERROR)
+	tid_t tid = thread_create(name, PRI_DEFAULT, __do_fork, &my_data);
+	if (tid == TID_ERROR){
 		return TID_ERROR;
+	}
 
-	struct thread *child = get_child_process(pid);
-
-	sema_down(&child->load_sema);
-
-	if (child->exit_status == -2)
+	struct thread *child = get_thread_from_tid(tid);
+	sema_down(&child->process_sema);
+	if(child->exit_status == TID_ERROR)
 	{
 		sema_up(&child->exit_sema);
 		return TID_ERROR;
 	}
-	return pid;
+	return tid;
 }
 
 #ifndef VM
@@ -123,10 +172,11 @@ duplicate_pte(uint64_t *pte, void *va, void *aux)
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
-	newpage = palloc_get_page(PAL_USER | PAL_ZERO);
-	if (newpage == NULL)
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL){
+		palloc_free_page(newpage);
 		return false;
-
+	}
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
@@ -135,9 +185,9 @@ duplicate_pte(uint64_t *pte, void *va, void *aux)
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
-	if (!pml4_set_page(current->pml4, va, newpage, writable))
-	{
+	if (!pml4_set_page(current->pml4, va, newpage, writable)){
 		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page(newpage);
 		return false;
 	}
 	return true;
@@ -149,60 +199,76 @@ duplicate_pte(uint64_t *pte, void *va, void *aux)
  *       That is, you are required to pass second argument of process_fork to
  *       this function. */
 static void
-__do_fork(void *aux)
+__do_fork(struct parent_info *aux)
 {
 	struct intr_frame if_;
-	struct thread *parent = (struct thread *)aux;
-	struct thread *current = thread_current();
+	struct thread *parent = aux->parent;
+	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if = &parent->parent_if;
+	struct intr_frame *parent_if = aux->parent_f;
 	bool succ = true;
 
-	/* 1. Read the cpu context to local stack. */
-	memcpy(&if_, parent_if, sizeof(struct intr_frame));
-	if_.R.rax = 0;
+    /* 1. Read the cpu context to local stack. */
+    memcpy(&if_, parent_if, sizeof(struct intr_frame));
+    if_.R.rax = 0;
 
-	/* 2. Duplicate PT */
-	current->pml4 = pml4_create();
-	if (current->pml4 == NULL)
-		goto error;
+    /* 2. Duplicate PT */
+    current->pml4 = pml4_create();
+    if (current->pml4 == NULL)
+        goto error;
 
-	process_activate(current);
+    process_activate(current);
 #ifdef VM
-	supplemental_page_table_init(&current->spt);
-	if (!supplemental_page_table_copy(&current->spt, &parent->spt))
-		goto error;
+    supplemental_page_table_init(&current->spt);
+    if (!supplemental_page_table_copy(&current->spt, &parent->spt))
+        goto error;
 #else
-	if (!pml4_for_each(parent->pml4, duplicate_pte, parent))
-		goto error;
+    if (!pml4_for_each(parent->pml4, duplicate_pte, parent))
+        goto error;
 #endif
 
-	/* TODO: Your code goes here.
-	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
-	 * TODO:       in include/filesys/file.h. Note that parent should not return
-	 * TODO:       from the fork() until this function successfully duplicates
-	 * TODO:       the resources of parent.*/
-
-	for (int i = 0; i < FDT_COUNT_LIMIT; i++)
-	{
-		struct file *file = parent->fdt[i];
-		if (file == NULL)
-			continue;
-		if (file > 2)
-			file = file_duplicate(file);
-		current->fdt[i] = file;
+    /* TODO: Your code goes here.
+     * TODO: Hint) To duplicate the file object, use `file_duplicate`
+     * TODO:       in include/filesys/file.h. Note that parent should not return
+     * TODO:       from the fork() until this function successfully duplicates
+     * TODO:       the resources of parent.*/
+	if (current->last_created_fd == 126){
+		goto error;
 	}
-	current->next_fd = parent->next_fd;
+	struct list_elem* e = list_begin(&parent->fd_table);
+	struct list *parent_list = &parent->fd_table;
+	if(!list_empty(parent_list)){
+		for (e ; e != list_end(parent_list) ; e = list_next(e)){
+			struct file_descriptor* parent_fd =list_entry(e,struct file_descriptor, fd_elem);
+			if(parent_fd->file != NULL){
+				struct file_descriptor *child_fd = malloc(sizeof(struct file_descriptor));
+				child_fd->file = file_duplicate(parent_fd->file);
+				if (child_fd->file == NULL){
+					free(child_fd);
+					continue; 
+				}
+				child_fd->fd = parent_fd->fd;
+				list_push_back(&current->fd_table, & child_fd->fd_elem);
+			}
+			current->last_created_fd = parent->last_created_fd;
+		}
+		current->last_created_fd = parent->last_created_fd;
+	} else {
+		current->last_created_fd = parent->last_created_fd;
+	}
 
-	sema_up(&current->load_sema);
-	process_init();
+	if_.R.rax = 0;
 
-	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret(&if_);
+    sema_up(&current->process_sema);
+    process_init();
+
+    /* Finally, switch to the newly created process. */
+    if (succ)
+        do_iret(&if_);
 error:
-	sema_up(&current->load_sema);
-	exit(-2);
+    // sema_up(&current->process_sema);
+	sema_up(&current->process_sema);
+    exit(TID_ERROR);
 }
 
 /* Switch the current execution context to the f_name.
@@ -223,120 +289,86 @@ int process_exec(void *f_name)
 	/* We first kill the current context */
 	process_cleanup();
 
-	char *parse[64];
-	char *token, *save_ptr;
-	int count = 0;
-	for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr))
-		parse[count++] = token;
-
 	/* And then load the binary */
-	success = load(file_name, &_if);
+	lock_acquire(&filesys_lock);
+	success = load (file_name, &_if);
+	lock_release(&filesys_lock);
 
 	/* If load failed, quit. */
+	palloc_free_page (file_name);
 	if (!success)
-	{
-		palloc_free_page(file_name);
 		return -1;
-	}
-
-	argument_stack(parse, count, &_if.rsp);
-	_if.R.rdi = count;
-	_if.R.rsi = (char *)_if.rsp + 8;
-
-	palloc_free_page(file_name);
 
 	/* Start switched process. */
 	do_iret(&_if);
 	NOT_REACHED();
 }
 
-void argument_stack(char **parse, int count, void **rsp)
-{
-	for (int i = count - 1; i > -1; i--)
-	{
-		for (int j = strlen(parse[i]); j > -1; j--)
-		{
-			(*rsp)--;
-			**(char **)rsp = parse[i][j];
-		}
-		parse[i] = *(char **)rsp;
-	}
 
-	int padding = (int)*rsp % 8;
-	for (int i = 0; i < padding; i++)
-	{
-		(*rsp)--;
-		**(uint8_t **)rsp = 0;
-	}
-
-	(*rsp) -= 8;
-	**(char ***)rsp = 0;
-
-	for (int i = count - 1; i > -1; i--)
-	{
-		(*rsp) -= 8;
-		**(char ***)rsp = parse[i];
-	}
-
-	// return address push
-	(*rsp) -= 8;
-	**(void ***)rsp = 0;
-}
-/* Waits for thread TID to die and returns its exit status.
+/* Waits for thread TID to die and returns its exit status.  If
+ * it was terminated by the kernel (i.e. killed due to an
+ * exception), returns -1.  If TID is invalid or if it was not a
+ * child of the calling process, or if process_wait() has already
+ * been successfully called for the given TID, returns -1
+ * immediately, without waiting.
+ *
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
-int process_wait(tid_t child_tid UNUSED)
+int process_wait(tid_t child_tid)
 {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	struct thread *child = get_child_process(child_tid);
-	if (child == NULL)
+	struct thread *t = get_thread_from_tid(child_tid);
+	if (t == NULL)
 		return -1;
 
-	sema_down(&child->wait_sema);
-	list_remove(&child->child_elem);
-	sema_up(&child->exit_sema);
+	sema_down(&t->wait_sema);
+	list_remove(&t->child_list_elem);
 
-	return child->exit_status;
+	sema_up(&t->exit_sema);
+	return t->exit_status; 
 }
 
 /* Exit the process. This function is called by thread_exit (). */
 void process_exit(void)
 {
-	struct thread *cur = thread_current();
 	/* TODO: Your code goes here.
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+	struct thread *t = thread_current();
 
-	for (int i = 2; i < FDT_COUNT_LIMIT; i++)
+
+	if (t->pml4 != NULL){
+		printf("%s: exit(%d)\n", t->name, t->exit_status);
+		file_close(t->running);
+		t->running = NULL;
+	}
+
+	for(int i = 2; i< t->last_created_fd; ++i){
 		close(i);
-	palloc_free_page(cur->fdt);
-	file_close(cur->running);
-
+	}
+	file_close(t->running);
 	process_cleanup();
+	sema_up(&t->wait_sema);
+	sema_down(&t->exit_sema);
 
-	sema_up(&cur->wait_sema);
-	sema_down(&cur->exit_sema);
 }
 
 /* Free the current process's resources. */
 static void
-process_cleanup(void)
-{
-	struct thread *curr = thread_current();
+process_cleanup (void) {
+	struct thread *curr = thread_current ();
 
 #ifdef VM
-	supplemental_page_table_kill(&curr->spt);
+	supplemental_page_table_kill (&curr->spt);
 #endif
-
 	uint64_t *pml4;
 	/* Destroy the current process's page directory and switch back
 	 * to the kernel-only page directory. */
 	pml4 = curr->pml4;
-	if (pml4 != NULL)
-	{
+	if (pml4 != NULL) {
 		/* Correct ordering here is crucial.  We must set
 		 * cur->pagedir to NULL before switching page directories,
 		 * so that a timer interrupt can't switch back to the
@@ -416,11 +448,11 @@ struct ELF64_PHDR
 #define ELF ELF64_hdr
 #define Phdr ELF64_PHDR
 
-static bool setup_stack(struct intr_frame *if_);
-static bool validate_segment(const struct Phdr *, struct file *);
-static bool load_segment(struct file *file, off_t ofs, uint8_t *upage,
-						 uint32_t read_bytes, uint32_t zero_bytes,
-						 bool writable);
+static bool setup_stack (struct intr_frame *if_);
+static bool validate_segment (const struct Phdr *, struct file *);
+static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
+		uint32_t read_bytes, uint32_t zero_bytes,
+		bool writable);
 
 /* Loads an ELF executable from FILE_NAME into the current thread.
  * Stores the executable's entry point into *RIP
@@ -429,12 +461,21 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage,
 static bool
 load(const char *file_name, struct intr_frame *if_)
 {
-	struct thread *t = thread_current();
+	struct thread *t = thread_current ();
 	struct ELF ehdr;
 	struct file *file = NULL;
 	off_t file_ofs;
 	bool success = false;
-	int i;
+	int i, j;
+
+	char *stk[64];
+	int argc = 0;
+	char *token, *save_ptr;
+
+   	for (token = strtok_r (file_name, " ", &save_ptr); token != NULL; token = strtok_r (NULL, " ", &save_ptr)){
+		stk[argc] = token;
+		argc++;
+	}
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create();
@@ -528,6 +569,10 @@ load(const char *file_name, struct intr_frame *if_)
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+
+	argument_stack(stk, argc, if_);
+	if_->R.rsi = if_->rsp + 8;
+	if_->R.rdi = argc;	
 
 	success = true;
 
@@ -684,65 +729,37 @@ install_page(void *upage, void *kpage, bool writable)
 
 	/* Verify that there's not already a page at that virtual
 	 * address, then map our page there. */
-	return (pml4_get_page(t->pml4, upage) == NULL && pml4_set_page(t->pml4, upage, kpage, writable));
+	return (pml4_get_page (t->pml4, upage) == NULL
+			&& pml4_set_page (t->pml4, upage, kpage, writable)); 
 }
-
-int process_add_file(struct file *f)
-{
-	struct thread *curr = thread_current();
-	struct file **fdt = curr->fdt;
-
-	while (curr->next_fd < FDT_COUNT_LIMIT && fdt[curr->next_fd])
-		curr->next_fd++;
-	if (curr->next_fd == FDT_COUNT_LIMIT)
-		return -1;
-	fdt[curr->next_fd] = f;
-
-	return curr->next_fd;
-}
-
-struct file *process_get_file(int fd)
-{
-	struct thread *curr = thread_current();
-	struct file **fdt = curr->fdt;
-	if (fd < 0 || fd > FDT_COUNT_LIMIT)
-		return NULL;
-	return fdt[fd];
-}
-
-void process_close_file(int fd)
-{
-	struct thread *curr = thread_current();
-	struct file **fdt = curr->fdt;
-	if (fd < 0 || fd > FDT_COUNT_LIMIT)
-		return NULL;
-	fdt[fd] = NULL;
-}
-
-struct thread *get_child_process(int pid)
-{
-	struct thread *cur = thread_current();
-	struct list *child_list = &cur->child_list;
-	for (struct list_elem *e = list_begin(child_list); e != list_end(child_list); e = list_next(e))
-	{
-		struct thread *t = list_entry(e, struct thread, child_elem);
-		if (t->tid == pid)
-			return t;
-	}
-	return NULL;
-}
-
 #else
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
-static bool
-lazy_load_segment(struct page *page, void *aux)
+bool lazy_load_segment(struct page *page, void *aux)
 {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	
+	struct lazy *lazy = (struct lazy*)aux;
+
+
+	file_seek(lazy->file, lazy->ofs);
+	/* Load this page. */
+	if(file_read(lazy->file, page->frame->kva, lazy->read_bytes) != (int) lazy->read_bytes){
+		palloc_free_page(page->frame->kva);	
+		
+		return false;
+		
+	}
+	void* start;
+	start = page->frame->kva + lazy->read_bytes;
+	memset(start,0,lazy->zero_bytes);
+
+	return true;
+
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -776,15 +793,22 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
-		if (!vm_alloc_page_with_initializer(VM_ANON, upage,
-											writable, lazy_load_segment, aux))
+		struct lazy *aux = (struct lazy*)malloc(sizeof(struct lazy));
+		aux->file = file;
+		aux->ofs = ofs;
+		aux->read_bytes = page_read_bytes;
+		aux->zero_bytes = page_zero_bytes;
+
+		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
+					writable, lazy_load_segment, aux)){
 			return false;
+		}
 
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		ofs += page_read_bytes;
 	}
 	return true;
 }
@@ -800,7 +824,28 @@ setup_stack(struct intr_frame *if_)
 	 * TODO: If success, set the rsp accordingly.
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
-
+	if(vm_alloc_page_with_initializer(VM_ANON, stack_bottom, true, NULL, NULL)){
+		if (vm_claim_page(stack_bottom)){
+			success = true; 
+			if_->rsp = USER_STACK;
+			thread_current()->stack_bottom = stack_bottom;
+		}
+	}
 	return success;
 }
 #endif /* VM */
+
+struct thread *get_thread_from_tid(tid_t thread_id){
+	struct thread * t = thread_current();
+	struct list* child_list = &t->child_list;
+	struct list_elem* e;
+
+	for (e = list_begin (child_list); e != list_end (child_list); e = list_next (e))
+	{
+		t = list_entry(e, struct thread, child_list_elem);
+		if (t->tid == thread_id){
+			return t;
+		}
+	}	
+	return NULL; 
+}
